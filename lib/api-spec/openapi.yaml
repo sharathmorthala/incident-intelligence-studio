@@ -201,6 +201,8 @@ components:
           enum: [opensearch, elasticsearch, splunk, loki, cloudwatch, paste]
         rawLogs:
           type: ["string", "null"]
+        allowDemoFallback:
+          type: boolean
       required:
         - correlationId
         - serviceName
@@ -309,6 +311,16 @@ components:
           enum: [high, medium, low]
         mttr:
           type: ["string", "null"]
+        logsRetrieved:
+          type: ["integer", "null"]
+        logSourceUsed:
+          type: string
+        analysisEngine:
+          type: string
+        warnings:
+          type: array
+          items:
+            type: string
       required:
         - correlationId
         - serviceName

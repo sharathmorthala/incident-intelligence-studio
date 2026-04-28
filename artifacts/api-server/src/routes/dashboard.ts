@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { db, incidentsTable } from "@workspace/db";
-import { sql } from "drizzle-orm";
+import { db, incidentsTable, integrationConfigsTable } from "@workspace/db";
+import { sql, eq } from "drizzle-orm";
 import { GetDashboardStatsResponse } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -33,11 +33,18 @@ router.get("/dashboard/stats", async (_req, res): Promise<void> => {
 
   const last7d = last7dResult?.count ?? 0;
 
+  const [connectedResult] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(integrationConfigsTable)
+    .where(eq(integrationConfigsTable.status, "connected"));
+
+  const connectedCount = connectedResult?.count ?? 0;
+
   const stats = {
     totalIncidentsAnalyzed: Math.max(total, 247),
     mttrImprovementPercent: 68,
     highConfidenceRcaCount: Math.max(highConf, 183),
-    activeIntegrationsCount: 3,
+    activeIntegrationsCount: Math.max(connectedCount, 0),
     incidentsLast24h: Math.max(last24h, 12),
     incidentsLast7d: Math.max(last7d, 74),
   };

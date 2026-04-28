@@ -6,43 +6,9 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2, CheckCircle2, XCircle, Info } from "lucide-react";
+import { fetchIntegrations, saveIntegration, testIntegration, type BackendIntegration } from "@/lib/backend-api";
 
 export type IntegrationStatus = "not-connected" | "demo" | "connected" | "failed";
-
-export interface IntegrationConfig {
-  fields: Record<string, string>;
-  boolFields: Record<string, boolean>;
-  status: IntegrationStatus;
-  savedAt?: string;
-}
-
-const SECRET_FIELDS = new Set([
-  "password", "apiKey", "api_key", "secretAccessKey", "secret_access_key",
-  "hecToken", "hec_token", "apiToken", "api_token",
-]);
-
-function maskSecret(value: string): string {
-  if (value.length <= 4) return "••••";
-  return "••••••••" + value.slice(-4);
-}
-
-function storageKey(name: string) {
-  return `iis_integration_${name.replace(/\s+/g, "_").toLowerCase()}`;
-}
-
-export function loadConfig(name: string): IntegrationConfig | null {
-  try {
-    const raw = localStorage.getItem(storageKey(name));
-    if (!raw) return null;
-    return JSON.parse(raw) as IntegrationConfig;
-  } catch {
-    return null;
-  }
-}
-
-function saveConfig(name: string, config: IntegrationConfig) {
-  localStorage.setItem(storageKey(name), JSON.stringify(config));
-}
 
 interface FieldDef {
   key: string;
@@ -171,41 +137,47 @@ export function IntegrationModal({ name, open, onClose, onSaved }: IntegrationMo
 
   const [fields, setFields] = useState<Record<string, string>>({});
   const [boolFields, setBoolFields] = useState<Record<string, boolean>>({});
-  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<"success" | "failed" | null>(null);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string; latencyMs?: number | null } | null>(null);
   const [saving, setSaving] = useState(false);
-  const [alreadySaved, setAlreadySaved] = useState(false);
+  const [loadingExisting, setLoadingExisting] = useState(false);
+  const [savedConfig, setSavedConfig] = useState<BackendIntegration | null>(null);
 
   useEffect(() => {
     if (!open || !spec) return;
 
-    const existing = loadConfig(name);
-    if (existing) {
-      setAlreadySaved(true);
-      const displayFields: Record<string, string> = {};
-      for (const fd of spec.fields) {
-        const val = existing.fields[fd.key] ?? "";
-        if ((fd.isSecret || SECRET_FIELDS.has(fd.key)) && val) {
-          displayFields[fd.key] = maskSecret(val);
-        } else {
-          displayFields[fd.key] = val;
-        }
-      }
-      setFields(displayFields);
-      setBoolFields(existing.boolFields ?? {});
-    } else {
-      setAlreadySaved(false);
-      const defaultFields: Record<string, string> = {};
-      const defaultBools: Record<string, boolean> = {};
-      for (const fd of spec.fields) defaultFields[fd.key] = "";
-      for (const bd of spec.boolFields ?? []) defaultBools[bd.key] = bd.defaultValue ?? false;
-      setFields(defaultFields);
-      setBoolFields(defaultBools);
-    }
-
-    setRevealed({});
     setTestResult(null);
+    setLoadingExisting(true);
+
+    fetchIntegrations()
+      .then((all) => {
+        const existing = all.find((i) => i.name === name) ?? null;
+        setSavedConfig(existing);
+
+        if (existing) {
+          const displayFields: Record<string, string> = {};
+          for (const fd of spec.fields) {
+            displayFields[fd.key] = existing.fields[fd.key] ?? "";
+          }
+          setFields(displayFields);
+          setBoolFields(existing.boolFields ?? {});
+        } else {
+          const defaultFields: Record<string, string> = {};
+          const defaultBools: Record<string, boolean> = {};
+          for (const fd of spec.fields) defaultFields[fd.key] = "";
+          for (const bd of spec.boolFields ?? []) defaultBools[bd.key] = bd.defaultValue ?? false;
+          setFields(defaultFields);
+          setBoolFields(defaultBools);
+        }
+      })
+      .catch(() => {
+        const defaultFields: Record<string, string> = {};
+        for (const fd of spec.fields) defaultFields[fd.key] = "";
+        setFields(defaultFields);
+        setBoolFields({});
+        setSavedConfig(null);
+      })
+      .finally(() => setLoadingExisting(false));
   }, [open, name]);
 
   if (!spec) return null;
@@ -215,80 +187,53 @@ export function IntegrationModal({ name, open, onClose, onSaved }: IntegrationMo
     if (testResult) setTestResult(null);
   }
 
-  function getStoredValue(key: string): string {
-    const existing = loadConfig(name);
-    return existing?.fields[key] ?? fields[key] ?? "";
-  }
-
-  function isFieldMasked(fd: FieldDef): boolean {
-    if (!(fd.isSecret || SECRET_FIELDS.has(fd.key))) return false;
-    if (!alreadySaved) return false;
-    if (revealed[fd.key]) return false;
-    const val = fields[fd.key] ?? "";
-    return val.startsWith("••••");
-  }
-
   async function handleTestConnection() {
     setTesting(true);
     setTestResult(null);
-    await new Promise((r) => setTimeout(r, 1800 + Math.random() * 800));
-    const success = Math.random() > 0.2;
-    setTestResult(success ? "success" : "failed");
-    setTesting(false);
-    toast({
-      title: success ? "Connection successful" : "Connection failed",
-      description: success
-        ? `Successfully reached ${name}. Demo mode — no real credentials were validated.`
-        : `Could not connect to ${name}. Check endpoint and credentials. (Simulated failure — demo mode)`,
-      variant: success ? "default" : "destructive",
-    });
+    try {
+      const result = await testIntegration({ name, fields, boolFields });
+      setTestResult({ ok: result.ok, message: result.message, latencyMs: result.latencyMs });
+      toast({
+        title: result.ok ? "Connection successful" : "Connection failed",
+        description: result.message,
+        variant: result.ok ? "default" : "destructive",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setTestResult({ ok: false, message: msg });
+      toast({
+        title: "Test failed",
+        description: msg,
+        variant: "destructive",
+      });
+    } finally {
+      setTesting(false);
+    }
   }
 
   async function handleSave() {
     setSaving(true);
-    await new Promise((r) => setTimeout(r, 600));
-
-    const realFields: Record<string, string> = {};
-    for (const fd of spec.fields) {
-      const val = fields[fd.key] ?? "";
-      if ((fd.isSecret || SECRET_FIELDS.has(fd.key)) && val.startsWith("••••")) {
-        realFields[fd.key] = getStoredValue(fd.key);
-      } else {
-        realFields[fd.key] = val;
-      }
+    try {
+      const result = await saveIntegration({ name, fields, boolFields });
+      onSaved(result.status as IntegrationStatus);
+      toast({
+        title: "Configuration saved",
+        description: `${name} configuration saved to server. ${testResult?.ok ? "Status: Connected." : "Status: Demo Mode — test connection to verify credentials."}`,
+      });
+      onClose();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Save failed";
+      toast({ title: "Save failed", description: msg, variant: "destructive" });
+    } finally {
+      setSaving(false);
     }
-
-    const newStatus: IntegrationStatus = testResult === "success" ? "connected" : "demo";
-    const config: IntegrationConfig = {
-      fields: realFields,
-      boolFields,
-      status: newStatus,
-      savedAt: new Date().toISOString(),
-    };
-    saveConfig(name, config);
-    setAlreadySaved(true);
-
-    const maskedDisplay: Record<string, string> = {};
-    for (const fd of spec.fields) {
-      const raw = realFields[fd.key] ?? "";
-      maskedDisplay[fd.key] = (fd.isSecret || SECRET_FIELDS.has(fd.key)) && raw ? maskSecret(raw) : raw;
-    }
-    setFields(maskedDisplay);
-    setRevealed({});
-    setSaving(false);
-
-    onSaved(newStatus);
-    toast({
-      title: "Configuration saved",
-      description: `${name} configuration saved. ${newStatus === "connected" ? "Status: Connected." : "Status: Demo Mode — test connection to verify credentials."}`,
-    });
-    onClose();
   }
 
   const missingRequired = spec.fields.some((fd) => {
     if (fd.optional) return false;
     const val = fields[fd.key] ?? "";
-    return !val.trim();
+    const isMasked = val.startsWith("••••") && !!savedConfig?.fields[fd.key];
+    return !val.trim() && !isMasked;
   });
 
   return (
@@ -306,97 +251,97 @@ export function IntegrationModal({ name, open, onClose, onSaved }: IntegrationMo
           <span>
             <strong>Demo mode</strong> uses generated sample logs.{" "}
             <strong>Connected mode</strong> queries your actual {spec.category === "ai-model" ? "AI provider" : "log source"}.
-            Credentials are stored locally and never transmitted by this demo.
+            Credentials are stored server-side encrypted and never returned to the browser.
           </span>
         </div>
 
-        <div className="space-y-4 mt-2">
-          {spec.fields.map((fd) => {
-            const masked = isFieldMasked(fd);
-            const isSecret = fd.isSecret || SECRET_FIELDS.has(fd.key);
-            return (
-              <div key={fd.key} className="space-y-1.5">
-                <Label htmlFor={fd.key} className="text-sm font-medium flex items-center gap-1.5">
-                  {fd.label}
-                  {fd.optional && (
-                    <span className="text-muted-foreground font-normal text-xs">(optional)</span>
-                  )}
-                </Label>
-                <div className="flex gap-2">
-                  <Input
-                    id={fd.key}
-                    type={isSecret && !revealed[fd.key] ? "password" : "text"}
-                    placeholder={masked ? "" : fd.placeholder}
-                    value={fields[fd.key] ?? ""}
-                    onChange={(e) => updateField(fd.key, e.target.value)}
-                    disabled={masked}
-                    className="bg-muted/30 border-muted text-foreground placeholder:text-muted-foreground/50 text-sm font-mono disabled:opacity-60 disabled:cursor-default"
-                  />
-                  {isSecret && alreadySaved && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="shrink-0 text-xs"
-                      onClick={() => {
-                        if (masked) {
-                          setRevealed((prev) => ({ ...prev, [fd.key]: true }));
-                          const existing = loadConfig(name);
-                          setFields((prev) => ({ ...prev, [fd.key]: existing?.fields[fd.key] ?? "" }));
-                        } else {
-                          setRevealed((prev) => ({ ...prev, [fd.key]: false }));
-                          const existing = loadConfig(name);
-                          const raw = existing?.fields[fd.key] ?? "";
-                          setFields((prev) => ({ ...prev, [fd.key]: raw ? maskSecret(raw) : "" }));
-                        }
-                      }}
-                    >
-                      {masked ? "Edit" : "Mask"}
-                    </Button>
-                  )}
+        {loadingExisting ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            <span className="ml-2 text-sm text-muted-foreground">Loading saved configuration...</span>
+          </div>
+        ) : (
+          <div className="space-y-4 mt-2">
+            {spec.fields.map((fd) => {
+              const isSecret = fd.isSecret;
+              const val = fields[fd.key] ?? "";
+              const isMasked = isSecret && val.startsWith("••••") && !!savedConfig?.fields[fd.key];
+
+              return (
+                <div key={fd.key} className="space-y-1.5">
+                  <Label htmlFor={fd.key} className="text-sm font-medium flex items-center gap-1.5">
+                    {fd.label}
+                    {fd.optional && (
+                      <span className="text-muted-foreground font-normal text-xs">(optional)</span>
+                    )}
+                  </Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id={fd.key}
+                      type={isSecret ? "password" : "text"}
+                      placeholder={isMasked ? "" : fd.placeholder}
+                      value={val}
+                      onChange={(e) => updateField(fd.key, e.target.value)}
+                      disabled={isMasked}
+                      className="bg-muted/30 border-muted text-foreground placeholder:text-muted-foreground/50 text-sm font-mono disabled:opacity-60 disabled:cursor-default"
+                    />
+                    {isSecret && savedConfig && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0 text-xs"
+                        onClick={() => {
+                          if (isMasked) {
+                            updateField(fd.key, "");
+                          } else {
+                            updateField(fd.key, savedConfig.fields[fd.key] ?? "••••••••");
+                          }
+                        }}
+                      >
+                        {isMasked ? "Change" : "Keep Saved"}
+                      </Button>
+                    )}
+                  </div>
                 </div>
+              );
+            })}
+
+            {(spec.boolFields ?? []).map((bd) => (
+              <div key={bd.key} className="flex items-center gap-2">
+                <Checkbox
+                  id={bd.key}
+                  checked={boolFields[bd.key] ?? bd.defaultValue ?? false}
+                  onCheckedChange={(v) =>
+                    setBoolFields((prev) => ({ ...prev, [bd.key]: !!v }))
+                  }
+                />
+                <Label htmlFor={bd.key} className="text-sm cursor-pointer select-none">
+                  {bd.label}
+                </Label>
               </div>
-            );
-          })}
+            ))}
 
-          {(spec.boolFields ?? []).map((bd) => (
-            <div key={bd.key} className="flex items-center gap-2">
-              <Checkbox
-                id={bd.key}
-                checked={boolFields[bd.key] ?? bd.defaultValue ?? false}
-                onCheckedChange={(v) =>
-                  setBoolFields((prev) => ({ ...prev, [bd.key]: !!v }))
-                }
-              />
-              <Label htmlFor={bd.key} className="text-sm cursor-pointer select-none">
-                {bd.label}
-              </Label>
-            </div>
-          ))}
-
-          {testResult && (
-            <div className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${
-              testResult === "success"
-                ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
-                : "bg-red-500/10 border border-red-500/20 text-red-400"
-            }`}>
-              {testResult === "success"
-                ? <CheckCircle2 className="h-4 w-4 shrink-0" />
-                : <XCircle className="h-4 w-4 shrink-0" />}
-              <span>
-                {testResult === "success"
-                  ? "Connection test passed (demo simulation)"
-                  : "Connection test failed — verify credentials and endpoint"}
-              </span>
-            </div>
-          )}
-        </div>
+            {testResult && (
+              <div className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${
+                testResult.ok
+                  ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
+                  : "bg-red-500/10 border border-red-500/20 text-red-400"
+              }`}>
+                {testResult.ok
+                  ? <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  : <XCircle className="h-4 w-4 shrink-0" />}
+                <span className="text-xs">{testResult.message}{testResult.latencyMs != null ? ` (${testResult.latencyMs}ms)` : ""}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex flex-col gap-2 mt-2 pt-2 border-t border-border">
           <Button
             variant="outline"
             onClick={handleTestConnection}
-            disabled={testing || missingRequired}
+            disabled={testing || missingRequired || loadingExisting}
             className="w-full"
           >
             {testing && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
@@ -404,7 +349,7 @@ export function IntegrationModal({ name, open, onClose, onSaved }: IntegrationMo
           </Button>
           <Button
             onClick={handleSave}
-            disabled={saving || missingRequired}
+            disabled={saving || missingRequired || loadingExisting}
             className="w-full"
           >
             {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}

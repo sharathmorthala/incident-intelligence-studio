@@ -6,11 +6,12 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export type ContractFindingSeverity = typeof ContractFindingSeverity[keyof typeof ContractFindingSeverity];
+export type ContractReviewOverallRisk = typeof ContractReviewOverallRisk[keyof typeof ContractReviewOverallRisk];
 
 
-export const ContractFindingSeverity = {
+export const ContractReviewOverallRisk = {
   low: 'low',
   medium: 'medium',
   high: 'high',
+  critical: 'critical',
 } as const;
