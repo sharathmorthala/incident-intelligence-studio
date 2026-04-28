@@ -1,0 +1,91 @@
+The current Incident Intelligence Studio UI looks good, but I need you to explain and improve the integration behavior.
+
+Please inspect the current code and answer these first:
+1. Are the dashboard metrics currently mock/static data or stored in backend/database?
+2. Are the Recent Analyses mock data or generated from actual analyzer usage?
+3. Are the Settings integration buttons like Configure, Connect, and Upgrade Connection wired to any real logic?
+4. Where is the incident analysis logic implemented?
+5. Does the app currently call any real log source or AI model, or is everything deterministic/mock?
+
+After explaining, implement the next step:
+
+Improve Settings & Integrations so the buttons are functional in demo mode.
+
+Requirements:
+1. Clicking Configure or Connect should open a professional modal.
+2. Each integration modal should show the correct fields.
+
+For log sources:
+
+OpenSearch / Elasticsearch:
+- Endpoint URL
+- Index pattern
+- Username
+- Password or API key
+- TLS enabled checkbox
+- Test Connection button
+- Save Configuration button
+
+Splunk:
+- Splunk host URL
+- HEC token or API token
+- Index
+- Source type
+- Test Connection
+- Save Configuration
+
+Grafana Loki:
+- Loki endpoint URL
+- Tenant ID optional
+- Basic auth username/password optional
+- Label selector default
+- Test Connection
+- Save Configuration
+
+AWS CloudWatch:
+- AWS region
+- Log group name
+- Access key ID
+- Secret access key
+- Test Connection
+- Save Configuration
+
+For AI model providers:
+
+Azure OpenAI:
+- Endpoint
+- Deployment name
+- API version
+- API key
+- Test Connection
+- Save Configuration
+
+OpenAI:
+- API key
+- Model name
+- Test Connection
+- Save Configuration
+
+AWS Bedrock:
+- AWS region
+- Model ID
+- Access key ID
+- Secret access key
+- Test Connection
+- Save Configuration
+
+Ollama:
+- Base URL, default http://localhost:11434
+- Model name
+- Test Connection
+- Save Configuration
+
+Important:
+- For now, keep connection testing as simulated/demo logic unless credentials are available.
+- Store configurations locally/in-memory or database if already configured.
+- Never expose secrets in the UI after saving. Mask them.
+- Change misleading button text like “Upgrade Connection” to “Configure Provider”.
+- Add status states: Not Connected, Demo Mode, Connected, Connection Failed.
+- Add toast notifications for Test Connection and Save.
+- Add clear helper text saying “Demo mode uses generated sample logs. Connected mode queries your actual log source.”
+- Do not break the existing dashboard, analyzer, contract reviewer, or design reviewer.
