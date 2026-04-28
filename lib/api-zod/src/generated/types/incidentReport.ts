@@ -8,6 +8,8 @@
 import type { DownstreamFailure } from './downstreamFailure';
 import type { ErrorPattern } from './errorPattern';
 import type { IncidentReportConfidence } from './incidentReportConfidence';
+import type { ObservabilitySignal } from './observabilitySignal';
+import type { ServiceGroup } from './serviceGroup';
 import type { TimelineEvent } from './timelineEvent';
 
 export interface IncidentReport {
@@ -33,4 +35,13 @@ export interface IncidentReport {
   logSourceUsed?: string;
   analysisEngine?: string;
   warnings?: string[];
+  propagationPath?: string[];
+  /** @nullable */
+  firstFailureService?: string | null;
+  /** @nullable */
+  blastRadius?: number | null;
+  /** @nullable */
+  cascadeDescription?: string | null;
+  observabilitySignals?: ObservabilitySignal[];
+  serviceGroups?: ServiceGroup[];
 }

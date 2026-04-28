@@ -200,6 +200,12 @@ router.post("/analyze-incident", async (req, res): Promise<void> => {
     logSourceUsed,
     analysisEngine: provider.name,
     warnings: warnings.length > 0 ? warnings : undefined,
+    propagationPath: analysis.propagationPath ?? [],
+    firstFailureService: analysis.firstFailureService ?? null,
+    blastRadius: analysis.blastRadius ?? null,
+    cascadeDescription: analysis.cascadeDescription ?? null,
+    observabilitySignals: analysis.observabilitySignals ?? [],
+    serviceGroups: analysis.serviceGroups ?? [],
   };
 
   res.json(AnalyzeIncidentResponse.parse(report));

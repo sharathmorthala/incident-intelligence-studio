@@ -66,7 +66,28 @@ export const AnalyzeIncidentResponse = zod.object({
   "logsRetrieved": zod.number().nullish(),
   "logSourceUsed": zod.string().optional(),
   "analysisEngine": zod.string().optional(),
-  "warnings": zod.array(zod.string()).optional()
+  "warnings": zod.array(zod.string()).optional(),
+  "propagationPath": zod.array(zod.string()).optional(),
+  "firstFailureService": zod.string().nullish(),
+  "blastRadius": zod.number().nullish(),
+  "cascadeDescription": zod.string().nullish(),
+  "observabilitySignals": zod.array(zod.object({
+  "type": zod.enum(['latency_spike', 'error_rate_burst', 'retry_storm', 'circuit_breaker_open', 'connection_pool_exhaustion', 'memory_pressure']),
+  "service": zod.string(),
+  "description": zod.string(),
+  "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+  "detectedAt": zod.string()
+})).optional(),
+  "serviceGroups": zod.array(zod.object({
+  "service": zod.string(),
+  "logCount": zod.number(),
+  "errorCount": zod.number(),
+  "warnCount": zod.number(),
+  "firstEventAt": zod.string(),
+  "lastEventAt": zod.string(),
+  "firstErrorAt": zod.string().nullable(),
+  "role": zod.enum(['origin', 'upstream', 'downstream', 'inferred'])
+})).optional()
 })
 
 
@@ -129,7 +150,28 @@ export const GetIncidentResponse = zod.object({
   "logsRetrieved": zod.number().nullish(),
   "logSourceUsed": zod.string().optional(),
   "analysisEngine": zod.string().optional(),
-  "warnings": zod.array(zod.string()).optional()
+  "warnings": zod.array(zod.string()).optional(),
+  "propagationPath": zod.array(zod.string()).optional(),
+  "firstFailureService": zod.string().nullish(),
+  "blastRadius": zod.number().nullish(),
+  "cascadeDescription": zod.string().nullish(),
+  "observabilitySignals": zod.array(zod.object({
+  "type": zod.enum(['latency_spike', 'error_rate_burst', 'retry_storm', 'circuit_breaker_open', 'connection_pool_exhaustion', 'memory_pressure']),
+  "service": zod.string(),
+  "description": zod.string(),
+  "severity": zod.enum(['low', 'medium', 'high', 'critical']),
+  "detectedAt": zod.string()
+})).optional(),
+  "serviceGroups": zod.array(zod.object({
+  "service": zod.string(),
+  "logCount": zod.number(),
+  "errorCount": zod.number(),
+  "warnCount": zod.number(),
+  "firstEventAt": zod.string(),
+  "lastEventAt": zod.string(),
+  "firstErrorAt": zod.string().nullable(),
+  "role": zod.enum(['origin', 'upstream', 'downstream', 'inferred'])
+})).optional()
 })
 
 

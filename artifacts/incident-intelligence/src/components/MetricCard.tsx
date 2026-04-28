@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 
 interface MetricCardProps {
   title: string;
-  value: string | number;
+  value: React.ReactNode;
   trend?: string;
   trendDirection?: "up" | "down" | "neutral";
   icon?: React.ReactNode;

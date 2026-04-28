@@ -1,3 +1,6 @@
+import { correlateLogs, correlateRawLogs, type ObservabilitySignal, type ServiceGroup } from "./log-correlator";
+import type { NormalizedLogEntry } from "./connectors/opensearch-connector";
+
 export interface TimelineEvent {
   timestamp: string;
   service: string;
@@ -31,6 +34,13 @@ export interface IncidentAnalysis {
   suggestedRollback: string;
   confidence: "high" | "medium" | "low";
   mttr: string | null;
+  // Intelligence fields
+  propagationPath: string[];
+  firstFailureService: string | null;
+  blastRadius: number | null;
+  cascadeDescription: string | null;
+  observabilitySignals: ObservabilitySignal[];
+  serviceGroups: ServiceGroup[];
 }
 
 const MOCK_SCENARIOS: Record<string, IncidentAnalysis> = {
@@ -67,7 +77,7 @@ const MOCK_SCENARIOS: Record<string, IncidentAnalysis> = {
     ],
     suggestedFixes: [
       "Implement certificate expiry alerting with 30-day and 7-day warning thresholds on payment-gateway TLS configuration",
-      "Increase thread pool timeout from 30s to 5s with exponential backoff to fail faster and reduce queue buildup",
+      "Reduce thread pool timeout from 30s to 5s with exponential backoff to fail faster and reduce queue buildup",
       "Add payment-gateway health check to circuit breaker probe — trigger at 3 consecutive failures",
       "Configure Kubernetes HPA on payment-service to scale out when thread pool utilization exceeds 60%",
       "Implement async payment processing with idempotent retry queue for checkout resilience during gateway degradation",
@@ -76,6 +86,23 @@ const MOCK_SCENARIOS: Record<string, IncidentAnalysis> = {
       "Revert the certificate rotation script (`scripts/rotate-tls.sh`) to the previous version. Re-issue the TLS certificate using `openssl req -newkey rsa:4096` against the confirmed-working CA endpoint. Validate via `curl -v --max-time 5 https://payment-gateway/health` before routing traffic.",
     confidence: "high",
     mttr: "18m 44s",
+    propagationPath: ["payment-gateway", "payment-service", "order-api", "cart-service", "notification-service"],
+    firstFailureService: "payment-gateway",
+    blastRadius: 5,
+    cascadeDescription: "Failure originated in payment-gateway (TLS certificate issue) and cascaded through 5 services: payment-gateway → payment-service → order-api → cart-service → notification-service.",
+    observabilitySignals: [
+      { type: "latency_spike", service: "payment-gateway", description: "TLS handshake latency elevated to 2800ms (5.6× normal threshold of 500ms)", severity: "high", detectedAt: "2025-04-28T14:23:11Z" },
+      { type: "connection_pool_exhaustion", service: "payment-service", description: "Thread pool exhausted: 200/200 threads active, 847 requests queued waiting for upstream response", severity: "critical", detectedAt: "2025-04-28T14:24:19Z" },
+      { type: "circuit_breaker_open", service: "order-api", description: "Circuit breaker OPEN for payment-service — failing fast after 3 consecutive timeout failures", severity: "high", detectedAt: "2025-04-28T14:24:55Z" },
+      { type: "error_rate_burst", service: "order-api", description: "3,847 timeout errors within 17-minute window — error rate 226× baseline", severity: "critical", detectedAt: "2025-04-28T14:24:02Z" },
+    ],
+    serviceGroups: [
+      { service: "payment-gateway", logCount: 4, errorCount: 1, warnCount: 1, firstEventAt: "2025-04-28T14:23:11Z", lastEventAt: "2025-04-28T14:38:44Z", firstErrorAt: "2025-04-28T14:31:17Z", role: "origin" },
+      { service: "payment-service", logCount: 3, errorCount: 1, warnCount: 1, firstEventAt: "2025-04-28T14:23:44Z", lastEventAt: "2025-04-28T14:41:22Z", firstErrorAt: "2025-04-28T14:24:19Z", role: "downstream" },
+      { service: "order-api", logCount: 3, errorCount: 2, warnCount: 0, firstEventAt: "2025-04-28T14:24:02Z", lastEventAt: "2025-04-28T14:41:55Z", firstErrorAt: "2025-04-28T14:24:02Z", role: "downstream" },
+      { service: "cart-service", logCount: 1, errorCount: 1, warnCount: 0, firstEventAt: "2025-04-28T14:25:08Z", lastEventAt: "2025-04-28T14:25:08Z", firstErrorAt: "2025-04-28T14:25:08Z", role: "downstream" },
+      { service: "notification-service", logCount: 1, errorCount: 0, warnCount: 1, firstEventAt: "2025-04-28T14:27:33Z", lastEventAt: "2025-04-28T14:27:33Z", firstErrorAt: null, role: "downstream" },
+    ],
   },
 
   "CORR-AUTH-401": {
@@ -114,6 +141,21 @@ const MOCK_SCENARIOS: Record<string, IncidentAnalysis> = {
       "Manually restore the previous JWT public key in Vault: `vault kv put secret/auth/jwt-public-key value=@/backup/jwt-pub-prev.pem`. Force-rollout token-validator with `kubectl rollout restart deployment/token-validator`. Monitor 401 rate in Grafana dashboard `auth-service/error-rates`.",
     confidence: "high",
     mttr: "8m 29s",
+    propagationPath: ["auth-service", "token-validator", "api-gateway", "user-service"],
+    firstFailureService: "auth-service",
+    blastRadius: 4,
+    cascadeDescription: "JWT key rotation in auth-service caused token-validator to reject all tokens, cascading 401 failures through api-gateway to user-service — 28,441 authentication failures in under 10 minutes.",
+    observabilitySignals: [
+      { type: "error_rate_burst", service: "api-gateway", description: "401 Unauthorized spike: 340 requests/min vs baseline of 2 (170× increase)", severity: "critical", detectedAt: "2025-04-28T09:07:33Z" },
+      { type: "error_rate_burst", service: "token-validator", description: "JWT signature verification failures: 28,441 errors in 8-minute window", severity: "critical", detectedAt: "2025-04-28T09:07:44Z" },
+    ],
+    serviceGroups: [
+      { service: "auth-service", logCount: 1, errorCount: 0, warnCount: 0, firstEventAt: "2025-04-28T09:00:00Z", lastEventAt: "2025-04-28T09:00:00Z", firstErrorAt: null, role: "origin" },
+      { service: "vault", logCount: 2, errorCount: 0, warnCount: 0, firstEventAt: "2025-04-28T09:02:14Z", lastEventAt: "2025-04-28T09:14:22Z", firstErrorAt: null, role: "upstream" },
+      { service: "api-gateway", logCount: 3, errorCount: 1, warnCount: 1, firstEventAt: "2025-04-28T09:07:33Z", lastEventAt: "2025-04-28T09:16:02Z", firstErrorAt: "2025-04-28T09:09:17Z", role: "downstream" },
+      { service: "token-validator", logCount: 2, errorCount: 1, warnCount: 0, firstEventAt: "2025-04-28T09:07:44Z", lastEventAt: "2025-04-28T09:15:44Z", firstErrorAt: "2025-04-28T09:07:44Z", role: "downstream" },
+      { service: "user-service", logCount: 1, errorCount: 1, warnCount: 0, firstEventAt: "2025-04-28T09:08:01Z", lastEventAt: "2025-04-28T09:08:01Z", firstErrorAt: "2025-04-28T09:08:01Z", role: "downstream" },
+    ],
   },
 
   "CORR-DOWNSTREAM-FAIL": {
@@ -153,6 +195,21 @@ const MOCK_SCENARIOS: Record<string, IncidentAnalysis> = {
       "If migration is still running: `SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE query LIKE '%ALTER TABLE inventory%' AND state = 'active'`. Reset connection pool in inventory-service by cycling pods: `kubectl rollout restart deployment/inventory-service`. Monitor pool utilization via `/metrics` endpoint.",
     confidence: "high",
     mttr: "34m 3s",
+    propagationPath: ["inventory-db", "inventory-service", "order-fulfillment", "shipping-coordinator", "warehouse-api"],
+    firstFailureService: "inventory-db",
+    blastRadius: 4,
+    cascadeDescription: "Long-running DB migration in inventory-db held table locks for 23 minutes, causing connection pool exhaustion in inventory-service, which propagated through order-fulfillment and shipping-coordinator — 8,700 orders impacted.",
+    observabilitySignals: [
+      { type: "connection_pool_exhaustion", service: "inventory-service", description: "DB connection pool exhausted: AcquireTimeout after 5000ms — all 1,847 pool acquisition attempts failed", severity: "critical", detectedAt: "2025-04-28T11:09:44Z" },
+      { type: "retry_storm", service: "order-fulfillment", description: "Retry storm: 2,400 retries queued against inventory-service in 3-minute window — compounding DB lock contention", severity: "high", detectedAt: "2025-04-28T11:13:47Z" },
+      { type: "error_rate_burst", service: "order-fulfillment", description: "8,723 'downstream unavailable' errors over 28-minute window", severity: "critical", detectedAt: "2025-04-28T11:10:02Z" },
+    ],
+    serviceGroups: [
+      { service: "inventory-db", logCount: 2, errorCount: 0, warnCount: 1, firstEventAt: "2025-04-28T11:04:19Z", lastEventAt: "2025-04-28T11:27:06Z", firstErrorAt: null, role: "origin" },
+      { service: "inventory-service", logCount: 3, errorCount: 1, warnCount: 1, firstEventAt: "2025-04-28T11:06:33Z", lastEventAt: "2025-04-28T11:28:34Z", firstErrorAt: "2025-04-28T11:09:44Z", role: "downstream" },
+      { service: "order-fulfillment", logCount: 3, errorCount: 2, warnCount: 0, firstEventAt: "2025-04-28T11:10:02Z", lastEventAt: "2025-04-28T11:38:22Z", firstErrorAt: "2025-04-28T11:10:02Z", role: "downstream" },
+      { service: "shipping-coordinator", logCount: 1, errorCount: 1, warnCount: 0, firstEventAt: "2025-04-28T11:10:18Z", lastEventAt: "2025-04-28T11:10:18Z", firstErrorAt: "2025-04-28T11:10:18Z", role: "downstream" },
+    ],
   },
 
   "CORR-VALIDATION-ERROR": {
@@ -191,142 +248,105 @@ const MOCK_SCENARIOS: Record<string, IncidentAnalysis> = {
       "Roll back product-catalog-api to v2.3.0: `kubectl set image deployment/product-catalog-api app=product-catalog-api:v2.3.0`. Drain and reprocess dead letter queues in search-indexer: `kafka-consumer-groups --reset-offsets --to-datetime 2025-04-28T16:00:00Z`. Verify storefront-api 500 rate drops below 0.1%.",
     confidence: "high",
     mttr: "18m 2s",
+    propagationPath: ["product-catalog-api", "search-indexer", "recommendation-engine", "storefront-api"],
+    firstFailureService: "product-catalog-api",
+    blastRadius: 3,
+    cascadeDescription: "Breaking schema change in product-catalog-api v2.3.1 immediately caused validation failures across 3 downstream consumers — 9,053 total deserialization errors before hotfix v2.3.2 resolved the contract mismatch.",
+    observabilitySignals: [
+      { type: "error_rate_burst", service: "search-indexer", description: "4,218 schema validation errors in 18-minute window immediately following v2.3.1 deployment", severity: "critical", detectedAt: "2025-04-28T16:01:14Z" },
+      { type: "error_rate_burst", service: "recommendation-engine", description: "3,944 deserialization failures — unable to process product updates from catalog API", severity: "high", detectedAt: "2025-04-28T16:01:19Z" },
+      { type: "error_rate_burst", service: "storefront-api", description: "891 NPE errors — product detail pages returning 500 for ~12% of catalog", severity: "high", detectedAt: "2025-04-28T16:01:33Z" },
+    ],
+    serviceGroups: [
+      { service: "product-catalog-api", logCount: 2, errorCount: 0, warnCount: 0, firstEventAt: "2025-04-28T16:00:00Z", lastEventAt: "2025-04-28T16:18:44Z", firstErrorAt: null, role: "origin" },
+      { service: "search-indexer", logCount: 3, errorCount: 2, warnCount: 0, firstEventAt: "2025-04-28T16:01:14Z", lastEventAt: "2025-04-28T16:19:02Z", firstErrorAt: "2025-04-28T16:01:14Z", role: "downstream" },
+      { service: "recommendation-engine", logCount: 1, errorCount: 1, warnCount: 0, firstEventAt: "2025-04-28T16:01:19Z", lastEventAt: "2025-04-28T16:01:19Z", firstErrorAt: "2025-04-28T16:01:19Z", role: "downstream" },
+      { service: "storefront-api", logCount: 1, errorCount: 1, warnCount: 0, firstEventAt: "2025-04-28T16:01:33Z", lastEventAt: "2025-04-28T16:01:33Z", firstErrorAt: "2025-04-28T16:01:33Z", role: "downstream" },
+    ],
   },
 };
-
-function detectKeywords(logs: string): {
-  hasTimeout: boolean;
-  has500: boolean;
-  has401: boolean;
-  has403: boolean;
-  hasConnectionRefused: boolean;
-  hasNullPointer: boolean;
-  hasValidationFailed: boolean;
-  hasDownstreamUnavailable: boolean;
-} {
-  const lower = logs.toLowerCase();
-  return {
-    hasTimeout: lower.includes("timeout") || lower.includes("timed out"),
-    has500: lower.includes("500") || lower.includes("internal server error"),
-    has401: lower.includes("401") || lower.includes("unauthorized"),
-    has403: lower.includes("403") || lower.includes("forbidden"),
-    hasConnectionRefused: lower.includes("connection refused") || lower.includes("econnrefused"),
-    hasNullPointer: lower.includes("null pointer") || lower.includes("nullpointerexception") || lower.includes("cannot read") || lower.includes("undefined"),
-    hasValidationFailed: lower.includes("validation failed") || lower.includes("schema") || lower.includes("deserializ"),
-    hasDownstreamUnavailable: lower.includes("downstream") || lower.includes("upstream") || lower.includes("dependency") || lower.includes("503"),
-  };
-}
-
-function parseLogLines(rawLogs: string, serviceName: string): TimelineEvent[] {
-  const lines = rawLogs.split("\n").filter((l) => l.trim());
-  const events: TimelineEvent[] = [];
-
-  const timestampRegex = /(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})/;
-  const levelRegex = /\b(INFO|WARN|WARNING|ERROR|FATAL|DEBUG|CRITICAL)\b/i;
-
-  for (const line of lines.slice(0, 50)) {
-    const tsMatch = line.match(timestampRegex);
-    const levelMatch = line.match(levelRegex);
-
-    let timestamp = tsMatch ? tsMatch[1].replace(" ", "T") + "Z" : new Date().toISOString();
-    let rawLevel = levelMatch ? levelMatch[1].toUpperCase() : "INFO";
-    if (rawLevel === "WARNING" || rawLevel === "DEBUG") rawLevel = "WARN";
-    if (rawLevel === "CRITICAL") rawLevel = "FATAL";
-    const level = rawLevel as TimelineEvent["level"];
-
-    const message = line.replace(timestampRegex, "").replace(levelRegex, "").replace(/\s+/g, " ").trim() || line.trim();
-
-    events.push({ timestamp, service: serviceName, level, message: message.substring(0, 200) });
-  }
-
-  return events.length > 0 ? events : [{ timestamp: new Date().toISOString(), service: serviceName, level: "INFO", message: "Log parsing completed — no structured events detected" }];
-}
 
 function buildGenericAnalysis(
   correlationId: string,
   serviceName: string,
   environment: string,
-  rawLogs?: string | null
+  rawLogs?: string | null,
+  structuredLogs?: NormalizedLogEntry[]
 ): IncidentAnalysis {
-  if (rawLogs && rawLogs.trim()) {
-    const kw = detectKeywords(rawLogs);
-    const timeline = parseLogLines(rawLogs, serviceName);
+  // Use structured logs from a real source if available
+  const hasStructured = structuredLogs && structuredLogs.length > 0;
+  const hasRaw = rawLogs && rawLogs.trim().length > 0;
 
-    let summary = `Incident detected for ${serviceName} in ${environment} environment (correlation: ${correlationId}).`;
-    let probableRootCause = "Analysis based on provided log data.";
-    const suggestedFixes: string[] = [];
-    const errorPatterns: ErrorPattern[] = [];
-    const downstreamFailures: DownstreamFailure[] = [];
-    let confidence: "high" | "medium" | "low" = "medium";
+  let correlation = hasStructured
+    ? correlateLogs(structuredLogs, serviceName)
+    : hasRaw
+    ? correlateRawLogs(rawLogs!, serviceName)
+    : null;
 
-    const now = new Date().toISOString();
-    const fiveMinAgo = new Date(Date.now() - 5 * 60000).toISOString();
+  const now = new Date().toISOString();
+  const fiveMinAgo = new Date(Date.now() - 5 * 60000).toISOString();
 
-    if (kw.has401 || kw.has403) {
-      summary = `Authentication/authorization failure detected in ${serviceName}. Requests are being rejected with 4xx status codes.`;
-      probableRootCause = "Token validation failure or expired credentials. Likely caused by JWT key rotation, session expiry, or RBAC misconfiguration.";
-      errorPatterns.push({ pattern: "HTTP 401/403 Unauthorized", count: 847, severity: "high", firstSeen: fiveMinAgo, lastSeen: now });
-      suggestedFixes.push("Verify JWT signing key consistency across all service replicas", "Check token expiry settings and clock skew between services", "Review RBAC policies for recent changes");
-      confidence = "high";
-    } else if (kw.hasTimeout) {
-      summary = `Timeout cascade detected in ${serviceName}. Upstream dependencies are not responding within configured thresholds.`;
-      probableRootCause = "Upstream service latency degradation causing thread pool exhaustion. Connection pool saturation likely contributing to cascading failures.";
-      errorPatterns.push({ pattern: "Request timeout", count: 1243, severity: "critical", firstSeen: fiveMinAgo, lastSeen: now });
-      downstreamFailures.push({ service: "upstream-dependency", errorType: "Timeout", impactLevel: "high", details: "Upstream service response time exceeding configured timeout threshold" });
-      suggestedFixes.push("Implement circuit breaker pattern on upstream calls", "Reduce timeout threshold to fail fast (5s max)", "Add connection pool monitoring with alerting at 70% utilization");
-      confidence = "high";
-    } else if (kw.hasConnectionRefused) {
-      summary = `Connection refused errors detected. ${serviceName} cannot establish connections to dependent services.`;
-      probableRootCause = "Target service is unreachable — likely crashed, not yet ready, or network policy blocking connections. Pod restart or deployment rollout may be in progress.";
-      errorPatterns.push({ pattern: "ECONNREFUSED / Connection refused", count: 412, severity: "critical", firstSeen: fiveMinAgo, lastSeen: now });
-      downstreamFailures.push({ service: "target-service", errorType: "Connection Refused", impactLevel: "critical", details: "Service not accepting connections — check pod health and readiness probes" });
-      suggestedFixes.push("Check pod status: `kubectl get pods -n <namespace>`", "Review readiness probe configuration — ensure service is ready before routing traffic", "Verify network policies allow traffic on required ports");
-      confidence = "high";
-    } else if (kw.hasValidationFailed) {
-      summary = `Schema/validation failures detected in ${serviceName}. Data contract mismatch causing processing errors.`;
-      probableRootCause = "Breaking change in upstream data contract — field type or structure changed without backward-compatible migration. Consumer services failing to deserialize responses.";
-      errorPatterns.push({ pattern: "Validation/schema failure", count: 2891, severity: "high", firstSeen: fiveMinAgo, lastSeen: now });
-      suggestedFixes.push("Implement API versioning to avoid breaking changes", "Add consumer contract testing (Pact) to CI/CD pipeline", "Use schema registry to track and validate contract changes");
-      confidence = "high";
-    } else if (kw.has500) {
-      summary = `Internal server errors detected in ${serviceName}. Service is returning 5xx responses indicating unhandled exceptions.`;
-      probableRootCause = "Unhandled exception or null pointer error in application code. Recent deployment or configuration change may have introduced a regression.";
-      errorPatterns.push({ pattern: "HTTP 500 Internal Server Error", count: 654, severity: "high", firstSeen: fiveMinAgo, lastSeen: now });
-      suggestedFixes.push("Review recent deployments and configuration changes", "Check application logs for stack traces", "Verify database connectivity and query performance");
-      confidence = "medium";
-    } else {
-      summary = `Anomalous behavior detected in ${serviceName}. Log analysis indicates elevated error rates in the observed time window.`;
-      probableRootCause = "Insufficient signal from provided logs to determine root cause with high confidence. Additional context or structured log aggregation recommended.";
-      suggestedFixes.push("Enable structured JSON logging for better signal correlation", "Add distributed tracing (OpenTelemetry) to identify bottlenecks", "Configure log aggregation to include all dependent services");
-      confidence = "low";
-    }
+  // If correlation produced useful data, use it to drive the analysis
+  if (correlation && correlation.sortedTimeline.length > 0) {
+    const timeline: TimelineEvent[] = correlation.sortedTimeline.slice(0, 25).map((l) => ({
+      timestamp: l.timestamp,
+      service: l.service,
+      level: (["INFO", "WARN", "ERROR", "FATAL"].includes(l.level) ? l.level : "INFO") as TimelineEvent["level"],
+      message: l.message,
+    }));
 
-    if (kw.hasNullPointer) {
-      suggestedFixes.push("Add null safety checks for all external data deserialization paths");
-      errorPatterns.push({ pattern: "NullPointerException / undefined access", count: 89, severity: "medium", firstSeen: fiveMinAgo, lastSeen: now });
-    }
+    const patterns = correlation.detectedPatterns;
+    const errorPatterns: ErrorPattern[] = patterns.map((p) => ({
+      pattern: p.pattern,
+      count: p.count,
+      severity: p.severity,
+      firstSeen: p.firstSeen,
+      lastSeen: p.lastSeen,
+    }));
 
-    if (kw.hasDownstreamUnavailable) {
-      downstreamFailures.push({ service: "downstream-dependency", errorType: "Service Unavailable", impactLevel: "high", details: "One or more downstream dependencies reporting 503 or timeout" });
-    }
+    const dominantCategory = patterns[0]?.category;
+    const { summary, probableRootCause, suggestedFixes, confidence } = synthesizeFromCorrelation(
+      correlation, dominantCategory, serviceName, environment, correlationId
+    );
+
+    const affectedServices = correlation.groupedByService
+      .filter((g) => g.errorCount > 0 || g.service === serviceName)
+      .map((g) => g.service);
+
+    const downstreamFailures: DownstreamFailure[] = correlation.groupedByService
+      .filter((g) => g.role === "downstream" && g.errorCount > 0)
+      .map((g) => ({
+        service: g.service,
+        errorType: patterns[0]?.pattern ?? "Propagated Failure",
+        impactLevel: (g.errorCount > 100 ? "critical" : g.errorCount > 20 ? "high" : g.errorCount > 5 ? "medium" : "low") as DownstreamFailure["impactLevel"],
+        details: `${g.errorCount} error${g.errorCount !== 1 ? "s" : ""} detected — first failure at ${g.firstErrorAt?.slice(11, 19) ?? "unknown"} UTC`,
+      }));
 
     return {
       summary,
       probableRootCause,
       timeline,
-      affectedServices: [serviceName, ...downstreamFailures.map((d) => d.service)].filter((v, i, a) => a.indexOf(v) === i),
+      affectedServices: affectedServices.length > 0 ? affectedServices : [serviceName],
       errorPatterns,
       downstreamFailures,
       suggestedFixes,
-      suggestedRollback: `Roll back ${serviceName} to the previous known-good version: \`kubectl rollout undo deployment/${serviceName}\`. Verify health via \`kubectl rollout status deployment/${serviceName}\`. Monitor error rate in observability dashboard before closing the incident.`,
+      suggestedRollback: `Roll back ${serviceName} to the previous known-good version: \`kubectl rollout undo deployment/${serviceName}\`. Verify health via \`kubectl rollout status deployment/${serviceName}\`. Monitor error rate before closing the incident.`,
       confidence,
       mttr: null,
+      propagationPath: correlation.propagationPath,
+      firstFailureService: correlation.firstFailureService,
+      blastRadius: correlation.blastRadius,
+      cascadeDescription: correlation.cascadeDescription,
+      observabilitySignals: correlation.observabilitySignals,
+      serviceGroups: correlation.groupedByService,
     };
   }
 
+  // Named scenario lookup (no raw logs provided)
   const scenario = MOCK_SCENARIOS[correlationId];
   if (scenario) return scenario;
 
+  // Generic fallback
   return {
     summary: `Incident analysis for correlation ID ${correlationId} in ${serviceName} (${environment}). Log aggregation from the specified time range indicates elevated error rates and service degradation.`,
     probableRootCause: `Resource contention or configuration drift in ${serviceName}. Recommend cross-referencing with recent deployments and infrastructure changes in the ${environment} environment.`,
@@ -354,7 +374,133 @@ function buildGenericAnalysis(
     suggestedRollback: `Run \`kubectl rollout undo deployment/${serviceName}\` to revert to the previous stable version. Validate with smoke tests before closing the incident.`,
     confidence: "medium",
     mttr: null,
+    propagationPath: [serviceName, "load-balancer"],
+    firstFailureService: serviceName,
+    blastRadius: 2,
+    cascadeDescription: `Failure detected in ${serviceName} — limited cascade data available without real log source.`,
+    observabilitySignals: [
+      { type: "latency_spike", service: serviceName, description: "P99 response time at 2.8s (2.8× threshold)", severity: "high", detectedAt: new Date(Date.now() - 15 * 60000).toISOString() },
+    ],
+    serviceGroups: [
+      { service: serviceName, logCount: 3, errorCount: 2, warnCount: 1, firstEventAt: new Date(Date.now() - 15 * 60000).toISOString(), lastEventAt: new Date(Date.now() - 2 * 60000).toISOString(), firstErrorAt: new Date(Date.now() - 12 * 60000).toISOString(), role: "origin" },
+      { service: "load-balancer", logCount: 1, errorCount: 0, warnCount: 1, firstEventAt: new Date(Date.now() - 10 * 60000).toISOString(), lastEventAt: new Date(Date.now() - 10 * 60000).toISOString(), firstErrorAt: null, role: "downstream" },
+    ],
   };
+}
+
+function synthesizeFromCorrelation(
+  correlation: ReturnType<typeof correlateLogs>,
+  dominantCategory: string | undefined,
+  serviceName: string,
+  environment: string,
+  correlationId: string
+): { summary: string; probableRootCause: string; suggestedFixes: string[]; confidence: "high" | "medium" | "low" } {
+  const firstFail = correlation.firstFailureService ?? serviceName;
+  const path = correlation.propagationPath.join(" → ");
+  const blastRadius = correlation.blastRadius;
+
+  switch (dominantCategory) {
+    case "timeout":
+      return {
+        summary: `Timeout cascade detected in ${serviceName} (${environment}, correlation: ${correlationId}). Failure propagated across ${blastRadius} service${blastRadius !== 1 ? "s" : ""}: ${path}.`,
+        probableRootCause: `Upstream latency degradation in ${firstFail} caused thread pool saturation and connection queue buildup. Timeouts propagated downstream as dependent services exhausted their wait budgets. ${correlation.cascadeDescription}`,
+        suggestedFixes: [
+          `Implement circuit breaker on all calls from ${firstFail} — trigger at 3 consecutive failures or 50% error rate`,
+          "Reduce request timeout to 5s with exponential backoff (max 3 retries) to fail fast and free threads",
+          "Add connection pool monitoring with PagerDuty alert at 70% utilization",
+          "Configure HPA to scale upstream service when CPU/thread utilization exceeds 60%",
+          "Enable async processing with retry queue for non-critical downstream calls",
+        ],
+        confidence: "high",
+      };
+    case "auth_failure":
+      return {
+        summary: `Authentication failures cascading from ${firstFail} (${environment}, correlation: ${correlationId}). ${blastRadius} service${blastRadius !== 1 ? "s" : ""} affected: ${path}.`,
+        probableRootCause: `Token validation failure originating in ${firstFail}. Likely caused by JWT key rotation with propagation delay, session expiry, or RBAC misconfiguration. ${correlation.cascadeDescription}`,
+        suggestedFixes: [
+          "Implement JWKS endpoint with multi-key support — accept old and new keys during rotation window",
+          "Add pre-rotation smoke test: validate tokens signed with new key against all replicas before completing rotation",
+          "Reduce Vault-to-ConfigMap sync delay to under 30 seconds using external-secrets push mode",
+          "Add monitoring: alert when 401 rate exceeds 5× baseline for 60 consecutive seconds",
+        ],
+        confidence: "high",
+      };
+    case "dependency_failure":
+      return {
+        summary: `Dependency failure cascade originating in ${firstFail} (${environment}, correlation: ${correlationId}). ${blastRadius} service${blastRadius !== 1 ? "s" : ""} impacted: ${path}.`,
+        probableRootCause: `${firstFail} became unreachable — likely due to pod crash, OOM kill, network partition, or deployment issue. Upstream services received connection refused/503 errors and began retrying, compounding the outage. ${correlation.cascadeDescription}`,
+        suggestedFixes: [
+          `Check pod health: \`kubectl get pods -l app=${firstFail} -n ${environment}\``,
+          "Add readiness probe to delay traffic routing until service is fully ready",
+          "Implement circuit breaker with fallback response for non-critical dependency calls",
+          "Configure retry with exponential backoff and jitter to prevent retry storms",
+          "Add dead letter queue for failed requests to enable replay after recovery",
+        ],
+        confidence: "high",
+      };
+    case "validation_error":
+      return {
+        summary: `Schema validation failures from ${firstFail} (${environment}, correlation: ${correlationId}). Contract mismatch affected ${blastRadius} consumer service${blastRadius !== 1 ? "s" : ""}: ${path}.`,
+        probableRootCause: `Breaking change in ${firstFail} data contract — field type or structure changed without backward-compatible migration. Consumer services failed to deserialize responses. ${correlation.cascadeDescription}`,
+        suggestedFixes: [
+          "Implement API versioning — deploy breaking changes under `/v2/` and maintain `/v1/` for 90 days",
+          "Add consumer contract testing (Pact) to CI/CD pipeline to catch schema drift before deployment",
+          "Add backward-compatible field transformation to accept both old and new formats",
+          "Configure dead letter queue with replay capability for failed deserialization events",
+        ],
+        confidence: "high",
+      };
+    case "connection_pool_exhaustion":
+      return {
+        summary: `Connection pool exhaustion in ${firstFail} caused service degradation (${environment}, correlation: ${correlationId}). ${blastRadius} service${blastRadius !== 1 ? "s" : ""} affected: ${path}.`,
+        probableRootCause: `${firstFail} connection pool was exhausted — likely caused by a slow query holding connections, a traffic spike, or misconfigured pool size. Upstream services received AcquireTimeout errors. ${correlation.cascadeDescription}`,
+        suggestedFixes: [
+          "Set statement timeout on all queries: `SET statement_timeout = '30s'` to prevent connection hoarding",
+          "Increase connection pool size with per-service limits and queue depth alerting at 70%",
+          "Add connection pool metrics to observability dashboard — alert at 80% utilization for 60 seconds",
+          "Implement circuit breaker to prevent retry storms when pool is saturated",
+          "Run heavy migrations during off-peak windows with LOCK_TIMEOUT=30s",
+        ],
+        confidence: "high",
+      };
+    case "circuit_breaker":
+      return {
+        summary: `Circuit breaker activation detected in ${firstFail} (${environment}, correlation: ${correlationId}). Failure isolated via circuit breaker but ${blastRadius} service${blastRadius !== 1 ? "s" : ""} degraded: ${path}.`,
+        probableRootCause: `Circuit breaker triggered in ${firstFail} due to upstream service exceeding failure threshold. The breaker is now protecting the system by failing fast, but dependent services are receiving degraded responses. ${correlation.cascadeDescription}`,
+        suggestedFixes: [
+          "Investigate root cause of upstream failure that triggered circuit breaker",
+          "Verify circuit breaker thresholds are appropriate — check open/half-open transition timing",
+          "Implement graceful fallback response when circuit is open (cached data or default)",
+          "Add circuit breaker state to observability dashboard with Slack/PD alerts",
+        ],
+        confidence: "medium",
+      };
+    case "memory_pressure":
+      return {
+        summary: `Memory pressure / OOM detected in ${firstFail} (${environment}, correlation: ${correlationId}). ${blastRadius} service${blastRadius !== 1 ? "s" : ""} affected: ${path}.`,
+        probableRootCause: `${firstFail} exhausted available heap or container memory. Likely caused by a memory leak, unexpected traffic spike, or insufficient resource limits. OOM kills caused pod restarts which triggered downstream failures. ${correlation.cascadeDescription}`,
+        suggestedFixes: [
+          `Increase memory limits for ${firstFail}: add \`resources.limits.memory\` in Kubernetes deployment`,
+          "Enable JVM GC logging and analyze heap dump to identify memory leak",
+          "Configure HPA to scale out before memory pressure hits 80%",
+          "Add memory usage alert at 75% container memory limit",
+          "Review recent code changes for unbounded collections or missing cache eviction",
+        ],
+        confidence: "high",
+      };
+    default:
+      return {
+        summary: `Incident detected in ${serviceName} (${environment}, correlation: ${correlationId}). ${blastRadius > 0 ? `${blastRadius} service${blastRadius !== 1 ? "s" : ""} affected.` : ""} ${correlation.cascadeDescription}`,
+        probableRootCause: `Analysis of log data for ${correlationId} indicates anomalous behavior in ${firstFail}. Insufficient signal to determine root cause with high confidence — additional structured log data recommended.`,
+        suggestedFixes: [
+          "Enable structured JSON logging with consistent field names (service, level, correlationId, duration)",
+          "Add distributed tracing (OpenTelemetry) for end-to-end request visibility",
+          `Review recent deployments to ${serviceName} in the incident time window`,
+          "Check infrastructure metrics: CPU, memory, and disk I/O during the incident",
+        ],
+        confidence: "low",
+      };
+  }
 }
 
 export function analyzeIncident(params: {
@@ -364,6 +510,13 @@ export function analyzeIncident(params: {
   timeRange: string;
   logSource: string;
   rawLogs?: string | null;
+  structuredLogs?: NormalizedLogEntry[];
 }): IncidentAnalysis {
-  return buildGenericAnalysis(params.correlationId, params.serviceName, params.environment, params.rawLogs);
+  return buildGenericAnalysis(
+    params.correlationId,
+    params.serviceName,
+    params.environment,
+    params.rawLogs,
+    params.structuredLogs
+  );
 }

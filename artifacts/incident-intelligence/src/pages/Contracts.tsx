@@ -162,7 +162,7 @@ export default function Contracts() {
                   {review.findings.map((finding, i) => (
                     <Card key={i} className="bg-card border-card-border">
                       <CardContent className="p-4 flex gap-4 items-start">
-                        {finding.severity === "high" || finding.severity === "critical" ? 
+                        {finding.severity === "high" ? 
                           <AlertTriangle className="h-5 w-5 text-red-500 shrink-0 mt-0.5" /> : 
                           finding.severity === "medium" ?
                           <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" /> :
