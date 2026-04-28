@@ -3,13 +3,21 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Incident Intelligence Studio API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: incidents
+    description: Incident analysis operations
+  - name: dashboard
+    description: Dashboard statistics
+  - name: contracts
+    description: API contract review operations
+  - name: design
+    description: System design review operations
 paths:
   /healthz:
     get:
@@ -24,6 +32,140 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /analyze-incident:
+    post:
+      operationId: analyzeIncident
+      tags: [incidents]
+      summary: Analyze an incident
+      description: Analyzes logs for the given correlation ID and generates an incident report
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalyzeIncidentBody"
+      responses:
+        "200":
+          description: Incident report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentReport"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /incidents:
+    get:
+      operationId: listIncidents
+      tags: [incidents]
+      summary: List recent incidents
+      description: Returns a list of recently analyzed incidents
+      responses:
+        "200":
+          description: List of incidents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/IncidentSummary"
+
+  /incidents/{id}:
+    get:
+      operationId: getIncident
+      tags: [incidents]
+      summary: Get incident by ID
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Incident report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentReport"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /dashboard/stats:
+    get:
+      operationId: getDashboardStats
+      tags: [dashboard]
+      summary: Get dashboard statistics
+      description: Returns aggregate metrics for the dashboard
+      responses:
+        "200":
+          description: Dashboard statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+
+  /review-contract:
+    post:
+      operationId: reviewContract
+      tags: [contracts]
+      summary: Review an API contract
+      description: Analyzes request/response JSON for contract issues
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewContractBody"
+      responses:
+        "200":
+          description: Contract review result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractReview"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /review-design:
+    post:
+      operationId: reviewDesign
+      tags: [design]
+      summary: Review a system design
+      description: Analyzes architecture notes for design issues
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewDesignBody"
+      responses:
+        "200":
+          description: Design review result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DesignReview"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +176,312 @@ components:
       required:
         - status
 
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+
+    AnalyzeIncidentBody:
+      type: object
+      properties:
+        correlationId:
+          type: string
+        serviceName:
+          type: string
+        environment:
+          type: string
+          enum: [dev, qa, prod]
+        timeRange:
+          type: string
+        logSource:
+          type: string
+          enum: [opensearch, elasticsearch, splunk, loki, cloudwatch, paste]
+        rawLogs:
+          type: ["string", "null"]
+      required:
+        - correlationId
+        - serviceName
+        - environment
+        - timeRange
+        - logSource
+
+    TimelineEvent:
+      type: object
+      properties:
+        timestamp:
+          type: string
+        service:
+          type: string
+        level:
+          type: string
+          enum: [INFO, WARN, ERROR, FATAL]
+        message:
+          type: string
+      required:
+        - timestamp
+        - service
+        - level
+        - message
+
+    ErrorPattern:
+      type: object
+      properties:
+        pattern:
+          type: string
+        count:
+          type: integer
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        firstSeen:
+          type: string
+        lastSeen:
+          type: string
+      required:
+        - pattern
+        - count
+        - severity
+        - firstSeen
+        - lastSeen
+
+    DownstreamFailure:
+      type: object
+      properties:
+        service:
+          type: string
+        errorType:
+          type: string
+        impactLevel:
+          type: string
+          enum: [low, medium, high, critical]
+        details:
+          type: string
+      required:
+        - service
+        - errorType
+        - impactLevel
+        - details
+
+    IncidentReport:
+      type: object
+      properties:
+        id:
+          type: ["integer", "null"]
+        correlationId:
+          type: string
+        serviceName:
+          type: string
+        environment:
+          type: string
+        analyzedAt:
+          type: string
+        summary:
+          type: string
+        probableRootCause:
+          type: string
+        timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/TimelineEvent"
+        affectedServices:
+          type: array
+          items:
+            type: string
+        errorPatterns:
+          type: array
+          items:
+            $ref: "#/components/schemas/ErrorPattern"
+        downstreamFailures:
+          type: array
+          items:
+            $ref: "#/components/schemas/DownstreamFailure"
+        suggestedFixes:
+          type: array
+          items:
+            type: string
+        suggestedRollback:
+          type: string
+        confidence:
+          type: string
+          enum: [high, medium, low]
+        mttr:
+          type: ["string", "null"]
+      required:
+        - correlationId
+        - serviceName
+        - environment
+        - analyzedAt
+        - summary
+        - probableRootCause
+        - timeline
+        - affectedServices
+        - errorPatterns
+        - downstreamFailures
+        - suggestedFixes
+        - suggestedRollback
+        - confidence
+
+    IncidentSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+        correlationId:
+          type: string
+        serviceName:
+          type: string
+        environment:
+          type: string
+        confidence:
+          type: string
+          enum: [high, medium, low]
+        summary:
+          type: string
+        analyzedAt:
+          type: string
+        affectedServicesCount:
+          type: integer
+      required:
+        - id
+        - correlationId
+        - serviceName
+        - environment
+        - confidence
+        - summary
+        - analyzedAt
+        - affectedServicesCount
+
+    DashboardStats:
+      type: object
+      properties:
+        totalIncidentsAnalyzed:
+          type: integer
+        mttrImprovementPercent:
+          type: integer
+        highConfidenceRcaCount:
+          type: integer
+        activeIntegrationsCount:
+          type: integer
+        incidentsLast24h:
+          type: integer
+        incidentsLast7d:
+          type: integer
+      required:
+        - totalIncidentsAnalyzed
+        - mttrImprovementPercent
+        - highConfidenceRcaCount
+        - activeIntegrationsCount
+        - incidentsLast24h
+        - incidentsLast7d
+
+    ContractFinding:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [missing_field, type_mismatch, backward_compat_risk, schema_suggestion]
+        field:
+          type: string
+        severity:
+          type: string
+          enum: [low, medium, high]
+        description:
+          type: string
+        suggestion:
+          type: string
+      required:
+        - type
+        - field
+        - severity
+        - description
+        - suggestion
+
+    ReviewContractBody:
+      type: object
+      properties:
+        requestJson:
+          type: string
+        responseJson:
+          type: string
+        serviceName:
+          type: ["string", "null"]
+        version:
+          type: ["string", "null"]
+      required:
+        - requestJson
+        - responseJson
+
+    ContractReview:
+      type: object
+      properties:
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContractFinding"
+        overallRisk:
+          type: string
+          enum: [low, medium, high, critical]
+        summary:
+          type: string
+        suggestedSchema:
+          type: ["string", "null"]
+      required:
+        - findings
+        - overallRisk
+        - summary
+
+    DesignFinding:
+      type: object
+      properties:
+        category:
+          type: string
+          enum: [scalability, reliability, observability, security]
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        title:
+          type: string
+        description:
+          type: string
+        recommendation:
+          type: string
+      required:
+        - category
+        - severity
+        - title
+        - description
+        - recommendation
+
+    ReviewDesignBody:
+      type: object
+      properties:
+        architectureNotes:
+          type: string
+        systemName:
+          type: ["string", "null"]
+      required:
+        - architectureNotes
+
+    DesignReview:
+      type: object
+      properties:
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/DesignFinding"
+        overallScore:
+          type: integer
+        summary:
+          type: string
+        topRecommendations:
+          type: array
+          items:
+            type: string
+      required:
+        - findings
+        - overallScore
+        - summary
+        - topRecommendations
